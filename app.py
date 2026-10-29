@@ -11,6 +11,61 @@ load_dotenv()
 from werkzeug.security import generate_password_hash, check_password_hash
 # 🔑 الاستدعاء الحديث لمكتبة الذكاء الاصطناعي
 from google import genai
+from google.genai import types
+
+def get_ai_config(system_instruction, mode='fast'):
+    """دالة مساعدة مركزية لإرجاع إعدادات التكوين والبحث الشامل بأمان"""
+    temperature = 0.2 if mode == 'fast' else 0.6
+    return types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        max_output_tokens=8192,
+        temperature=temperature,
+        tools=[types.Tool(google_search=types.GoogleSearch())]  # تفعيل البحث الشامل رسميًا
+    )
+def get_working_response(contents, config, candidate_models, is_stream=False):
+    """دالة تقرأ جميع المفاتيح التي تبدأ بـ GEMINI_API_KEY من ملف .env وتجربها عند حدوث 429"""
+    api_keys = []
+    
+    # جلب كافة المفاتيح المعرفة في البيئة والتي تبدأ بـ GEMINI_API_KEY
+    for env_key, env_value in os.environ.items():
+        if env_key.startswith("GEMINI_API_KEY") and env_value.strip():
+            clean_key = env_value.strip().strip('"\'')
+            if clean_key not in api_keys:
+                api_keys.append(clean_key)
+    
+    if not api_keys:
+        print("⚠️ تنبيه: لم يتم العثور على أي مفاتيح API داخل ملف .env!")
+
+    for api_key in api_keys:
+        try:
+            temp_client = genai.Client(api_key=api_key)
+            for model_name in candidate_models:
+                try:
+                    if is_stream:
+                        response = temp_client.models.generate_content_stream(
+                            model=model_name,
+                            contents=contents,
+                            config=config
+                        )
+                        return response, model_name
+                    else:
+                        response = temp_client.models.generate_content(
+                            model=model_name,
+                            contents=contents,
+                            config=config
+                        )
+                        if response and response.text:
+                            return response.text, model_name
+                except Exception as e:
+                    if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                        print(f"⚠️ المفتاح الحالي استنفد حصته، جاري الانتقال للمفتاح التالي...")
+                        continue
+                    raise e
+        except Exception as e:
+            print(f"⚠️ خطأ في المفتاح الممرر: {e}")
+            continue
+            
+    return None, None
 from contextlib import contextmanager
 import sqlite3
 
@@ -545,12 +600,11 @@ def chat():
             "gemini-3.6-flash"
         ]
         system_instruction += "\n[توجيه صارم - إجابة سريعة]: أجب فوراً وبشكل مباشر ومختصر جداً في أسطر معدودة دون مقدمات."
-        config = {
-            "system_instruction": system_instruction,
-            "max_output_tokens": 8192,
-            "temperature": 0.2,
-            "tools": [{"google_search": {}}]  # 🌟 تم تفعيل البحث في جوجل هنا
-        }
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            max_output_tokens=8192,
+            temperature=0.2
+        )
 
         reply_text = None
         for model_name in candidate_models:
@@ -579,8 +633,7 @@ def chat():
         config = {
             "system_instruction": system_instruction,
             "max_output_tokens": 8192,
-            "temperature": 0.2,
-            "tools": [{"google_search": {}}]
+            "temperature": 0.3,
         }
 
         def fetch_response(model_name):
@@ -611,7 +664,7 @@ def chat():
     save_chat_to_db(chat_id, device_id, user_message, reply_text)
 
     return jsonify({"reply": reply_text})
-@app.route('/api/chat/stream', methods=['POST'])
+
 @app.route('/api/chat/stream', methods=['POST'])
 def chat_stream():
     data = request.json or {}
@@ -674,12 +727,11 @@ def chat_stream():
             "gemini-3.5-flash"
         ]
         system_instruction += "\n[توجيه صارم - إجابة سريعة]: أجب فوراً وبشكل مباشر ومختصر جداً."
-        config = {
-            "system_instruction": system_instruction,
-            "max_output_tokens": 8192,
-            "temperature": 0.2,
-            "tools": [{"google_search": {}}]
-        }
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            max_output_tokens=8192,
+            temperature=0.2
+        )
     else:
         candidate_models = [
             "gemini-flash-latest",
@@ -692,8 +744,7 @@ def chat_stream():
         config = {
             "system_instruction": system_instruction,
             "max_output_tokens": 8192,
-            "temperature": 0.6,
-            "tools": [{"google_search": {}}]
+            "temperature": 0.3,
         }
 
     raw_db_messages = []
@@ -783,6 +834,7 @@ def chat_stream():
         mimetype='text/event-stream',
         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no', 'Connection': 'keep-alive'}
     )
+
 @app.route('/api/admin/drivers/add', methods=['POST'])
 @admin_required('drivers')
 def add_driver():
